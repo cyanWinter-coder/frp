@@ -200,10 +200,10 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	svr.rc.PluginManager = svr.pluginManager
 
 	// Init HTTP group controller
-	svr.rc.HTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter)
+	svr.rc.HTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter, cfg.MaxLoadBalancerGroups)
 
 	// Init TCP mux group controller
-	svr.rc.TCPMuxGroupCtl = group.NewTCPMuxGroupCtl(svr.rc.TCPMuxHTTPConnectMuxer)
+	svr.rc.TCPMuxGroupCtl = group.NewTCPMuxGroupCtl(svr.rc.TCPMuxHTTPConnectMuxer, cfg.MaxLoadBalancerGroups)
 
 	// Init 404 not found page
 	vhost.NotFoundPagePath = cfg.Custom404Page
@@ -333,7 +333,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		}
 
 		// Init HTTPS group controller after HTTPSMuxer is created
-		svr.rc.HTTPSGroupCtl = group.NewHTTPSGroupController(svr.rc.VhostHTTPSMuxer)
+		svr.rc.HTTPSGroupCtl = group.NewHTTPSGroupController(svr.rc.VhostHTTPSMuxer, cfg.MaxLoadBalancerGroups)
 	}
 
 	// frp tls listener
@@ -382,7 +382,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	// Start port-manager cleanup workers only after all fallible steps have succeeded.
 	svr.rc.TCPPortManager = ports.NewManager("tcp", cfg.ProxyBindAddr, cfg.AllowPorts)
 	svr.rc.UDPPortManager = ports.NewManager("udp", cfg.ProxyBindAddr, cfg.AllowPorts)
-	svr.rc.TCPGroupCtl = group.NewTCPGroupCtl(svr.rc.TCPPortManager)
+	svr.rc.TCPGroupCtl = group.NewTCPGroupCtl(svr.rc.TCPPortManager, cfg.MaxLoadBalancerGroups)
 
 	if svr.webServer != nil {
 		svr.webServer.RouteRegister(svr.registerRouteHandlers)

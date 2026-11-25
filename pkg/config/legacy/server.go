@@ -163,6 +163,10 @@ type ServerCommonConf struct {
 	// may proxy to. If this value is 0, no limit will be applied. By default,
 	// this value is 0.
 	MaxPortsPerClient int64 `ini:"max_ports_per_client" json:"max_ports_per_client"`
+	// MaxLoadBalancerGroups specifies the maximum number of load balancing
+	// groups that may exist at the same time. If this value is 0, no limit
+	// will be applied. By default, this value is 0.
+	MaxLoadBalancerGroups int `ini:"max_load_balancer_groups" json:"max_load_balancer_groups"`
 	// TLSOnly specifies whether to only accept TLS-encrypted connections.
 	// By default, the value is false.
 	TLSOnly bool `ini:"tls_only" json:"tls_only"`

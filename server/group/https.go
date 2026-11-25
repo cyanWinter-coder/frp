@@ -22,13 +22,13 @@ import (
 )
 
 type HTTPSGroupController struct {
-	groupRegistry[*HTTPSGroup]
+	*groupRegistry[*HTTPSGroup]
 	httpsMuxer *vhost.HTTPSMuxer
 }
 
-func NewHTTPSGroupController(httpsMuxer *vhost.HTTPSMuxer) *HTTPSGroupController {
+func NewHTTPSGroupController(httpsMuxer *vhost.HTTPSMuxer, maxGroups int) *HTTPSGroupController {
 	return &HTTPSGroupController{
-		groupRegistry: newGroupRegistry[*HTTPSGroup](),
+		groupRegistry: newGroupRegistry[*HTTPSGroup]().withMaxGroups(maxGroups),
 		httpsMuxer:    httpsMuxer,
 	}
 }
@@ -39,12 +39,20 @@ func (ctl *HTTPSGroupController) Listen(
 	routeConfig vhost.RouteConfig,
 ) (l net.Listener, err error) {
 	for {
-		g := ctl.getOrCreate(group, func() *HTTPSGroup {
+		g, createErr := ctl.getOrCreate(group, func() *HTTPSGroup {
 			return NewHTTPSGroup(ctl)
 		})
+		if createErr != nil {
+			return nil, createErr
+		}
 		l, err = g.Listen(ctx, group, groupKey, routeConfig)
 		if err == errGroupStale {
 			continue
+		}
+		if err != nil {
+			ctl.removeIfEmpty(group, func(cur *HTTPSGroup) bool {
+				return cur == g && g.isEmpty()
+			})
 		}
 		return
 	}
@@ -61,6 +69,13 @@ func NewHTTPSGroup(ctl *HTTPSGroupController) *HTTPSGroup {
 	return &HTTPSGroup{
 		ctl: ctl,
 	}
+}
+
+// isEmpty reports whether the group has ever held a listener.
+func (g *HTTPSGroup) isEmpty() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.lns) == 0 && g.cleanupFn == nil
 }
 
 func (g *HTTPSGroup) Listen(

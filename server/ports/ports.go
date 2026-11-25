@@ -109,23 +109,10 @@ func (pm *Manager) Acquire(name string, port int) (realPort int, err error) {
 	}
 
 	if port == 0 {
-		// get random port
-		count := 0
-		maxTryTimes := 5
-		for k := range pm.freePorts {
-			count++
-			if count > maxTryTimes {
-				break
-			}
-			if pm.isPortAvailable(k) {
-				realPort = k
-				pm.markPortAcquiredLocked(name, realPort, portCtx)
-				break
-			}
-		}
-		if realPort == 0 {
-			err = ErrNoAvailablePort
-		}
+		// get a random port. Iterate over every candidate in the free pool so
+		// that ports temporarily taken by external processes are skipped
+		// instead of exhausting the manager after a few unlucky picks.
+		realPort, err = pm.acquireRandomLocked(name, portCtx)
 	} else {
 		// specified port
 		if _, ok = pm.freePorts[port]; ok {
@@ -151,6 +138,20 @@ func (pm *Manager) markPortAcquiredLocked(name string, port int, portCtx *PortCt
 	pm.usedPorts[port] = portCtx
 	pm.reservedPorts[name] = portCtx
 	delete(pm.freePorts, port)
+}
+
+// acquireRandomLocked picks any bindable port from the free pool. Candidates
+// occupied by external processes are skipped and stay in the pool for later
+// retries. pm.mu must be held.
+func (pm *Manager) acquireRandomLocked(name string, portCtx *PortCtx) (int, error) {
+	for candidate := range pm.freePorts {
+		if !pm.isPortAvailable(candidate) {
+			continue
+		}
+		pm.markPortAcquiredLocked(name, candidate, portCtx)
+		return candidate, nil
+	}
+	return 0, ErrNoAvailablePort
 }
 
 func (pm *Manager) isPortAvailable(port int) bool {
@@ -184,6 +185,14 @@ func (pm *Manager) Release(port int) {
 		ctx.Closed = true
 		ctx.UpdateTime = pm.clock.Now()
 	}
+}
+
+// HasFreePort reports whether port is currently in the allocatable pool.
+func (pm *Manager) HasFreePort(port int) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	_, ok := pm.freePorts[port]
+	return ok
 }
 
 // Release reserved port if it isn't used in last 24 hours.

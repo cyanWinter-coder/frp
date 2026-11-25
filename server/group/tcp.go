@@ -23,14 +23,15 @@ import (
 
 // TCPGroupCtl manages all TCPGroups.
 type TCPGroupCtl struct {
-	groupRegistry[*TCPGroup]
+	*groupRegistry[*TCPGroup]
 	portManager *ports.Manager
 }
 
-// NewTCPGroupCtl returns a new TCPGroupCtl.
-func NewTCPGroupCtl(portManager *ports.Manager) *TCPGroupCtl {
+// NewTCPGroupCtl returns a new TCPGroupCtl. A maxGroups value of 0 means no
+// limit on the number of concurrently registered groups.
+func NewTCPGroupCtl(portManager *ports.Manager, maxGroups int) *TCPGroupCtl {
 	return &TCPGroupCtl{
-		groupRegistry: newGroupRegistry[*TCPGroup](),
+		groupRegistry: newGroupRegistry[*TCPGroup]().withMaxGroups(maxGroups),
 		portManager:   portManager,
 	}
 }
@@ -41,15 +42,40 @@ func (tgc *TCPGroupCtl) Listen(proxyName string, group string, groupKey string,
 	addr string, port int,
 ) (l net.Listener, realPort int, err error) {
 	for {
-		tcpGroup := tgc.getOrCreate(group, func() *TCPGroup {
-			return NewTCPGroup(tgc)
-		})
+		tcpGroup, created, errRet := tgc.getOrCreateGroup(group)
+		if errRet != nil {
+			return nil, 0, errRet
+		}
 		l, realPort, err = tcpGroup.Listen(proxyName, group, groupKey, addr, port)
 		if err == errGroupStale {
 			continue
 		}
+		if err != nil && created {
+			// Listen failed before the group acquired any listener. Roll the
+			// empty group back out of the registry so failed creations do not
+			// accumulate and exhaust the group/port budget.
+			tgc.removeIfEmpty(group, func(cur *TCPGroup) bool {
+				return cur == tcpGroup && cur.isEmpty()
+			})
+		}
 		return
 	}
+}
+
+// getOrCreateGroup looks up the named group, creating an empty one when it
+// does not exist. The boolean result reports whether a new entry was created
+// and is only meaningful when err is nil.
+func (tgc *TCPGroupCtl) getOrCreateGroup(group string) (tg *TCPGroup, created bool, err error) {
+	if existing, ok := tgc.get(group); ok {
+		return existing, false, nil
+	}
+	tg, err = tgc.getOrCreate(group, func() *TCPGroup {
+		return NewTCPGroup(tgc)
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return tg, true, nil
 }
 
 // TCPGroup routes connections to different proxies.
@@ -67,6 +93,15 @@ func NewTCPGroup(ctl *TCPGroupCtl) *TCPGroup {
 	return &TCPGroup{
 		ctl: ctl,
 	}
+}
+
+// isEmpty reports whether the group has never held a listener. A group in this
+// state owns no port and can safely be removed from the registry after a
+// failed Listen.
+func (tg *TCPGroup) isEmpty() bool {
+	tg.mu.Lock()
+	defer tg.mu.Unlock()
+	return len(tg.lns) == 0 && tg.cleanupFn == nil
 }
 
 // Listen will return a new Listener.

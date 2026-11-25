@@ -24,6 +24,7 @@ var (
 	ErrListenerClosed     = errors.New("group listener closed")
 	ErrGroupDifferentPort = errors.New("group should have same remote port")
 	ErrProxyRepeated      = errors.New("group proxy repeated")
+	ErrGroupLimitExceeded = errors.New("group limit exceeded")
 
 	errGroupStale = errors.New("stale group reference")
 )

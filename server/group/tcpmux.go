@@ -26,14 +26,15 @@ import (
 
 // TCPMuxGroupCtl manages all TCPMuxGroups.
 type TCPMuxGroupCtl struct {
-	groupRegistry[*TCPMuxGroup]
+	*groupRegistry[*TCPMuxGroup]
 	tcpMuxHTTPConnectMuxer *tcpmux.HTTPConnectTCPMuxer
 }
 
-// NewTCPMuxGroupCtl returns a new TCPMuxGroupCtl.
-func NewTCPMuxGroupCtl(tcpMuxHTTPConnectMuxer *tcpmux.HTTPConnectTCPMuxer) *TCPMuxGroupCtl {
+// NewTCPMuxGroupCtl returns a new TCPMuxGroupCtl. A maxGroups value of 0
+// means no limit on the number of concurrently registered groups.
+func NewTCPMuxGroupCtl(tcpMuxHTTPConnectMuxer *tcpmux.HTTPConnectTCPMuxer, maxGroups int) *TCPMuxGroupCtl {
 	return &TCPMuxGroupCtl{
-		groupRegistry:          newGroupRegistry[*TCPMuxGroup](),
+		groupRegistry:          newGroupRegistry[*TCPMuxGroup]().withMaxGroups(maxGroups),
 		tcpMuxHTTPConnectMuxer: tcpMuxHTTPConnectMuxer,
 	}
 }
@@ -46,15 +47,23 @@ func (tmgc *TCPMuxGroupCtl) Listen(
 	routeConfig vhost.RouteConfig,
 ) (l net.Listener, err error) {
 	for {
-		tcpMuxGroup := tmgc.getOrCreate(group, func() *TCPMuxGroup {
+		tcpMuxGroup, createErr := tmgc.getOrCreate(group, func() *TCPMuxGroup {
 			return NewTCPMuxGroup(tmgc)
 		})
+		if createErr != nil {
+			return nil, createErr
+		}
 
 		switch v1.TCPMultiplexerType(multiplexer) {
 		case v1.TCPMultiplexerHTTPConnect:
 			l, err = tcpMuxGroup.HTTPConnectListen(ctx, group, groupKey, routeConfig)
 			if err == errGroupStale {
 				continue
+			}
+			if err != nil {
+				tmgc.removeIfEmpty(group, func(cur *TCPMuxGroup) bool {
+					return cur == tcpMuxGroup && tcpMuxGroup.isEmpty()
+				})
 			}
 			return
 		default:
@@ -79,6 +88,13 @@ func NewTCPMuxGroup(ctl *TCPMuxGroupCtl) *TCPMuxGroup {
 	return &TCPMuxGroup{
 		ctl: ctl,
 	}
+}
+
+// isEmpty reports whether the group has ever held a listener.
+func (tmg *TCPMuxGroup) isEmpty() bool {
+	tmg.mu.Lock()
+	defer tmg.mu.Unlock()
+	return len(tmg.lns) == 0 && tmg.cleanupFn == nil
 }
 
 // HTTPConnectListen will return a new Listener.

@@ -60,6 +60,9 @@ func (v *ConfigValidator) ValidateServerConfig(c *v1.ServerConfig) (Warning, err
 	if c.Transport.MaxPoolCount < 0 {
 		errs = AppendError(errs, fmt.Errorf("invalid transport.maxPoolCount, must be non-negative"))
 	}
+	if c.MaxLoadBalancerGroups < 0 {
+		errs = AppendError(errs, fmt.Errorf("invalid maxLoadBalancerGroups, must be non-negative"))
+	}
 
 	for _, p := range c.HTTPPlugins {
 		if !lo.Every(SupportedHTTPPluginOps, p.Ops) {

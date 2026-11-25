@@ -85,6 +85,10 @@ type ServerConfig struct {
 	// MaxPortsPerClient specifies the maximum number of ports a single client
 	// may proxy to. If this value is 0, no limit will be applied.
 	MaxPortsPerClient int64 `json:"maxPortsPerClient,omitempty"`
+	// MaxLoadBalancerGroups specifies the maximum number of load balancing
+	// groups (including TCP, HTTP, HTTPS and TCPMux groups) that may exist at
+	// the same time. If this value is 0, no limit will be applied.
+	MaxLoadBalancerGroups int `json:"maxLoadBalancerGroups,omitempty"`
 	// UserConnTimeout specifies the maximum time to wait for a work
 	// connection. By default, this value is 10.
 	UserConnTimeout int64 `json:"userConnTimeout,omitempty"`

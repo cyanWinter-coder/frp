@@ -12,13 +12,13 @@ import (
 // HTTPGroupController manages HTTP groups that use round-robin
 // callback routing (fundamentally different from listener-based groups).
 type HTTPGroupController struct {
-	groupRegistry[*HTTPGroup]
+	*groupRegistry[*HTTPGroup]
 	vhostRouter *vhost.Routers
 }
 
-func NewHTTPGroupController(vhostRouter *vhost.Routers) *HTTPGroupController {
+func NewHTTPGroupController(vhostRouter *vhost.Routers, maxGroups int) *HTTPGroupController {
 	return &HTTPGroupController{
-		groupRegistry: newGroupRegistry[*HTTPGroup](),
+		groupRegistry: newGroupRegistry[*HTTPGroup]().withMaxGroups(maxGroups),
 		vhostRouter:   vhostRouter,
 	}
 }
@@ -28,12 +28,20 @@ func (ctl *HTTPGroupController) Register(
 	routeConfig vhost.RouteConfig,
 ) error {
 	for {
-		g := ctl.getOrCreate(group, func() *HTTPGroup {
+		g, err := ctl.getOrCreate(group, func() *HTTPGroup {
 			return NewHTTPGroup(ctl)
 		})
-		err := g.Register(proxyName, group, groupKey, routeConfig)
+		if err != nil {
+			return err
+		}
+		err = g.Register(proxyName, group, groupKey, routeConfig)
 		if err == errGroupStale {
 			continue
+		}
+		if err != nil {
+			ctl.removeIfEmpty(group, func(cur *HTTPGroup) bool {
+				return cur == g && g.isEmpty()
+			})
 		}
 		return err
 	}
@@ -68,6 +76,15 @@ func NewHTTPGroup(ctl *HTTPGroupController) *HTTPGroup {
 		pxyNames:    make([]string, 0),
 		ctl:         ctl,
 	}
+}
+
+// isEmpty reports whether the group has registered any proxy. An empty group
+// holds no vhost route and can safely be removed from the registry after a
+// failed Register.
+func (g *HTTPGroup) isEmpty() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.createFuncs) == 0
 }
 
 func (g *HTTPGroup) Register(

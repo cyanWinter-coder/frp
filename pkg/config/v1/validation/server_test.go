@@ -49,3 +49,29 @@ func TestValidateServerConfigMaxPoolCount(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateServerConfigMaxLoadBalancerGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		maxGroups int
+		wantErr   bool
+	}{
+		{name: "negative", maxGroups: -1, wantErr: true},
+		{name: "zero means no limit", maxGroups: 0},
+		{name: "positive", maxGroups: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validServerConfigWithAuth(v1.AuthServerConfig{Method: v1.AuthMethodToken})
+			cfg.MaxLoadBalancerGroups = tc.maxGroups
+			require.NoError(t, cfg.Complete())
+
+			_, err := NewConfigValidator(nil).ValidateServerConfig(cfg)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "invalid maxLoadBalancerGroups")
+				require.ErrorContains(t, err, "must be non-negative")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
