@@ -99,6 +99,27 @@ func (pm *Manager) hasReservedPort(name string) bool {
 	return ok
 }
 
+func TestManagerPortConflictReportsOccupant(t *testing.T) {
+	port := freeTCPPort(t)
+	pm := NewManager("tcp", "127.0.0.1", []types.PortsRange{{Single: port}})
+
+	_, err := pm.Acquire("occupant", port)
+	require.NoError(t, err)
+
+	_, err = pm.Acquire("newcomer", port)
+	require.ErrorIs(t, err, ErrPortAlreadyUsed)
+	var conflict *PortAlreadyUsedError
+	require.ErrorAs(t, err, &conflict)
+	require.Equal(t, port, conflict.Port)
+	require.Equal(t, "occupant", conflict.ProxyName)
+	require.Contains(t, err.Error(), "occupant")
+
+	// The occupant releases the port; the newcomer can then acquire it.
+	pm.Release(port)
+	_, err = pm.Acquire("newcomer", port)
+	require.NoError(t, err)
+}
+
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	port, closePort := listenOnLoopback(t, "tcp")

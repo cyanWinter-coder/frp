@@ -31,6 +31,7 @@ import (
 	"github.com/fatedier/frp/pkg/msg"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
 	"github.com/fatedier/frp/server/registry"
 )
@@ -378,6 +379,95 @@ func TestControlManagerCloseWaitsForInFlightLoginRun(t *testing.T) {
 	info, ok := clientRegistry.GetByKey("client")
 	require.True(t, ok)
 	require.False(t, info.Online)
+}
+
+func TestControlRegisterProxyPortConflictReportsOccupant(t *testing.T) {
+	port := freeTCPPortForControlTest(t)
+	portManager := ports.NewManager("tcp", "127.0.0.1", nil)
+	rc := &controller.ResourceController{TCPPortManager: portManager}
+	pxyManager := proxy.NewManager()
+
+	oldCtl := newProxyTestControl(t, "run-old", "user-old", rc, pxyManager)
+	newCtl := newProxyTestControl(t, "run-new", "user-new", rc, pxyManager)
+
+	_, err := oldCtl.RegisterProxy(&msg.NewProxy{ProxyName: "old-proxy", ProxyType: "tcp", RemotePort: port})
+	require.NoError(t, err)
+
+	// A new session asking for a port held by the old session sees who holds it.
+	_, err = newCtl.RegisterProxy(&msg.NewProxy{ProxyName: "new-proxy", ProxyType: "tcp", RemotePort: port})
+	require.ErrorIs(t, err, ports.ErrPortAlreadyUsed)
+	require.Contains(t, err.Error(), "old-proxy")
+	require.Contains(t, err.Error(), "user-old")
+	require.Contains(t, err.Error(), "run-old")
+	require.False(t, pxyManager.Exist("new-proxy"))
+
+	// Once the old session releases the port, the new session acquires it.
+	require.NoError(t, oldCtl.CloseProxy(&msg.CloseProxy{ProxyName: "old-proxy"}))
+	_, err = newCtl.RegisterProxy(&msg.NewProxy{ProxyName: "new-proxy", ProxyType: "tcp", RemotePort: port})
+	require.NoError(t, err)
+	require.NoError(t, newCtl.CloseProxy(&msg.CloseProxy{ProxyName: "new-proxy"}))
+}
+
+func TestControlHeartbeatTimeoutReleasesSessionResources(t *testing.T) {
+	port := freeTCPPortForControlTest(t)
+	portManager := ports.NewManager("tcp", "127.0.0.1", nil)
+	rc := &controller.ResourceController{TCPPortManager: portManager}
+	pxyManager := proxy.NewManager()
+
+	manager := NewControlManager(registry.NewClientRegistry())
+	ctl := newProxyTestControl(t, "run-hb", "user-hb", rc, pxyManager)
+	ctl.sessionCtx.ServerCfg.Transport.HeartbeatTimeout = 1
+	ctl.lastPing.Store(time.Now().Add(-2 * time.Second))
+
+	_, err := ctl.RegisterProxy(&msg.NewProxy{ProxyName: "hb-proxy", ProxyType: "tcp", RemotePort: port})
+	require.NoError(t, err)
+
+	mustAddAndActivate(t, manager, ctl)
+	require.True(t, ctl.Start())
+	waitForControlDone(t, ctl)
+
+	// The session cleanup unregistered the proxy and released its port.
+	require.False(t, pxyManager.Exist("hb-proxy"))
+	_, err = portManager.Acquire("probe", port)
+	require.NoError(t, err)
+	portManager.Release(port)
+}
+
+func newProxyTestControl(
+	t *testing.T,
+	runID string,
+	user string,
+	rc *controller.ResourceController,
+	pxyManager *proxy.Manager,
+) *Control {
+	t.Helper()
+	conn := newDeadlineReadConn()
+	msgConn := msg.NewConn(conn, msg.NewV1ReadWriter(conn))
+	ctl, err := NewControl(context.Background(), &SessionContext{
+		RC:            rc,
+		PxyManager:    pxyManager,
+		PluginManager: plugin.NewManager(),
+		AuthVerifier:  auth.AlwaysPassVerifier,
+		Conn:          msgConn,
+		LoginMsg: &msg.Login{
+			RunID: runID,
+			User:  user,
+		},
+		ServerCfg: &v1.ServerConfig{},
+	})
+	require.NoError(t, err)
+	ctl.serverMetrics = newCountingServerMetrics()
+	t.Cleanup(func() { _ = ctl.Close() })
+	return ctl
+}
+
+func freeTCPPortForControlTest(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	return port
 }
 
 func newLifecycleTestControl(

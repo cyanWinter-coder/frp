@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -39,6 +40,7 @@ import (
 	"github.com/fatedier/frp/pkg/util/xlog"
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/metrics"
+	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
 	"github.com/fatedier/frp/server/registry"
 )
@@ -883,6 +885,7 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 
 	remoteAddr, err = pxy.Run()
 	if err != nil {
+		err = ctl.decoratePortConflictError(err)
 		return
 	}
 	defer func() {
@@ -900,6 +903,22 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 	ctl.proxies[pxy.GetName()] = pxy
 	ctl.mu.Unlock()
 	return
+}
+
+// decoratePortConflictError appends the occupying session's identity to a port
+// conflict error, so a session that fails to acquire a port can tell which
+// client still holds it (for example a stale session that has not timed out yet).
+func (ctl *Control) decoratePortConflictError(err error) error {
+	var conflict *ports.PortAlreadyUsedError
+	if !errors.As(err, &conflict) {
+		return err
+	}
+	occupant, ok := ctl.sessionCtx.PxyManager.GetByName(conflict.ProxyName)
+	if !ok {
+		return err
+	}
+	info := occupant.GetUserInfo()
+	return fmt.Errorf("%w (held by user [%s], runID [%s])", err, info.User, info.RunID)
 }
 
 func (ctl *Control) CloseProxy(closeMsg *msg.CloseProxy) (err error) {

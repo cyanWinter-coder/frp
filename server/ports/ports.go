@@ -2,6 +2,7 @@ package ports
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"sync"
@@ -25,6 +26,22 @@ var (
 	ErrPortUnAvailable = errors.New("port unavailable")
 	ErrNoAvailablePort = errors.New("no available port")
 )
+
+// PortAlreadyUsedError reports a failed acquisition on an occupied port and
+// identifies the proxy currently holding it, so a new session can tell which
+// proxy (and transitively which client session) the port belongs to.
+type PortAlreadyUsedError struct {
+	Port      int
+	ProxyName string
+}
+
+func (e *PortAlreadyUsedError) Error() string {
+	return fmt.Sprintf("port %d is already used by proxy [%s]", e.Port, e.ProxyName)
+}
+
+func (e *PortAlreadyUsedError) Is(target error) bool {
+	return target == ErrPortAlreadyUsed
+}
 
 type PortCtx struct {
 	ProxyName  string
@@ -136,8 +153,8 @@ func (pm *Manager) Acquire(name string, port int) (realPort int, err error) {
 				err = ErrPortUnAvailable
 			}
 		} else {
-			if _, ok = pm.usedPorts[port]; ok {
-				err = ErrPortAlreadyUsed
+			if usedCtx, ok := pm.usedPorts[port]; ok {
+				err = &PortAlreadyUsedError{Port: port, ProxyName: usedCtx.ProxyName}
 			} else {
 				err = ErrPortNotAllowed
 			}
