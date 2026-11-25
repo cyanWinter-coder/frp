@@ -88,6 +88,24 @@ func (c *Client) Reload(ctx context.Context, strictMode bool) error {
 	return err
 }
 
+// GetConfigVersion returns the version of the configuration currently in
+// effect. It starts at 1 and advances once per successfully applied update.
+func (c *Client) GetConfigVersion(ctx context.Context) (uint64, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+c.address+"/api/config/version", nil)
+	if err != nil {
+		return 0, err
+	}
+	content, err := c.do(req)
+	if err != nil {
+		return 0, err
+	}
+	var resp model.ConfigVersionResp
+	if err = json.Unmarshal([]byte(content), &resp); err != nil {
+		return 0, fmt.Errorf("unmarshal http response error: %s", strings.TrimSpace(content))
+	}
+	return resp.Version, nil
+}
+
 func (c *Client) Stop(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+c.address+"/api/stop", nil)
 	if err != nil {

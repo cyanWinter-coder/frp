@@ -19,6 +19,12 @@ var (
 type ConfigManager interface {
 	ReloadFromFile(strict bool) error
 
+	// ConfigVersion returns the monotonically increasing version of the
+	// configuration currently in effect. It starts at 1 and advances only when
+	// an update applies successfully; failed or rolled-back updates leave it
+	// unchanged.
+	ConfigVersion() uint64
+
 	ReadConfigFile() (string, error)
 	WriteConfigFile(content []byte) error
 

@@ -137,7 +137,13 @@ func (vm *Manager) startVisitor(cfg v1.VisitorConfigurer) (err error) {
 	return
 }
 
-func (vm *Manager) UpdateAll(cfgs []v1.VisitorConfigurer) {
+// UpdateAll applies the desired visitor set as a transaction.
+//
+// Unchanged visitors keep running; removed or changed ones are stopped and new
+// ones are started. If any new visitor fails to start, every change made by
+// this call is rolled back and the previously running visitor set is restored
+// before the error is returned.
+func (vm *Manager) UpdateAll(cfgs []v1.VisitorConfigurer) error {
 	if len(cfgs) > 0 {
 		// Only start keepVisitorsRunning goroutine once and only when there is at least one visitor.
 		vm.keepVisitorsRunningOnce.Do(func() {
@@ -152,15 +158,19 @@ func (vm *Manager) UpdateAll(cfgs []v1.VisitorConfigurer) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
+	previousCfgs := make(map[string]v1.VisitorConfigurer, len(vm.cfgs))
+	previousVisitors := make(map[string]Visitor, len(vm.visitors))
+	for name, cfg := range vm.cfgs {
+		previousCfgs[name] = cfg
+	}
+	for name, v := range vm.visitors {
+		previousVisitors[name] = v
+	}
+
 	delNames := make([]string, 0)
 	for name, oldCfg := range vm.cfgs {
-		del := false
 		cfg, ok := cfgsMap[name]
 		if !ok || !reflect.DeepEqual(oldCfg, cfg) {
-			del = true
-		}
-
-		if del {
 			delNames = append(delNames, name)
 			delete(vm.cfgs, name)
 			if visitor, ok := vm.visitors[name]; ok {
@@ -173,18 +183,52 @@ func (vm *Manager) UpdateAll(cfgs []v1.VisitorConfigurer) {
 		xl.Infof("visitor removed: %v", delNames)
 	}
 
+	addedNames := make([]string, 0)
+	rollback := func(applyErr error) error {
+		xl.Warnf("apply visitors failed: %v, rolling back", applyErr)
+		for _, name := range addedNames {
+			delete(vm.cfgs, name)
+			if visitor, ok := vm.visitors[name]; ok {
+				visitor.Close()
+				delete(vm.visitors, name)
+			}
+		}
+		// Restore the previous set. Entries still present are unchanged
+		// visitors and must not be touched. A previous config whose visitor had
+		// failed to start before this transaction has no live instance to
+		// restore, so attempt to start it again; keepVisitorsRunning would
+		// otherwise retry it only on its slower ticker.
+		for name, cfg := range previousCfgs {
+			if _, ok := vm.cfgs[name]; ok {
+				continue
+			}
+			vm.cfgs[name] = cfg
+			if previous, ok := previousVisitors[name]; ok {
+				vm.visitors[name] = previous
+			} else if err := vm.startVisitor(cfg); err != nil {
+				xl.Warnf("rollback: restart previous visitor %s failed: %v", name, err)
+			}
+		}
+		return applyErr
+	}
+
 	addNames := make([]string, 0)
 	for _, cfg := range cfgs {
 		name := cfg.GetBaseConfig().Name
-		if _, ok := vm.cfgs[name]; !ok {
-			vm.cfgs[name] = cfg
-			addNames = append(addNames, name)
-			_ = vm.startVisitor(cfg)
+		if _, ok := vm.cfgs[name]; ok {
+			continue
 		}
+		vm.cfgs[name] = cfg
+		addedNames = append(addedNames, name)
+		if err := vm.startVisitor(cfg); err != nil {
+			return rollback(err)
+		}
+		addNames = append(addNames, name)
 	}
 	if len(addNames) > 0 {
 		xl.Infof("visitor added: %v", addNames)
 	}
+	return nil
 }
 
 // TransferConn transfers a connection to a visitor.

@@ -16,6 +16,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"time"
@@ -291,8 +292,16 @@ func (ctl *Control) worker() {
 	close(ctl.doneCh)
 }
 
+// UpdateAllConfigurer applies proxies and visitors as separate transactions.
+// Each manager rolls back its own changes on failure; the error from the first
+// failed manager is returned so the service layer can restore the other
+// manager and the published configuration.
 func (ctl *Control) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {
-	ctl.vm.UpdateAll(visitorCfgs)
-	ctl.pm.UpdateAll(proxyCfgs)
+	if err := ctl.vm.UpdateAll(visitorCfgs); err != nil {
+		return fmt.Errorf("update visitors: %w", err)
+	}
+	if err := ctl.pm.UpdateAll(proxyCfgs); err != nil {
+		return fmt.Errorf("update proxies: %w", err)
+	}
 	return nil
 }

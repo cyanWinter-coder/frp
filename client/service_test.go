@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/fatedier/frp/pkg/config/source"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
@@ -137,25 +139,33 @@ func TestUpdateConfigSourceRollsBackReloadCommonOnReplaceAllFailure(t *testing.T
 	}
 }
 
-func TestUpdateConfigSourceKeepsReloadCommonOnReloadFailure(t *testing.T) {
+func TestUpdateConfigSourceRollsBackAllStateOnReloadFailure(t *testing.T) {
 	prevCommon := &v1.ClientCommonConfig{User: "old-user"}
 	newCommon := &v1.ClientCommonConfig{User: "new-user"}
 
+	prevProxy := &v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: "existing",
+			Type: "tcp",
+		},
+	}
+	configSource := source.NewConfigSource()
+	require.NoError(t, configSource.ReplaceAll([]v1.ProxyConfigurer{prevProxy}, nil))
+
 	svr := &Service{
-		// Keep configSource valid so ReplaceAll succeeds first.
-		configSource: source.NewConfigSource(),
+		configSource: configSource,
 		reloadCommon: prevCommon,
-		// Keep aggregator nil to force reload failure.
+		// Keep aggregator nil to force reload failure after ReplaceAll succeeds.
 		aggregator: nil,
 	}
 
-	validProxy := &v1.TCPProxyConfig{
+	newProxy := &v1.TCPProxyConfig{
 		ProxyBaseConfig: v1.ProxyBaseConfig{
 			Name: "p1",
 			Type: "tcp",
 		},
 	}
-	err := svr.UpdateConfigSource(newCommon, []v1.ProxyConfigurer{validProxy}, nil)
+	err := svr.UpdateConfigSource(newCommon, []v1.ProxyConfigurer{newProxy}, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -164,8 +174,15 @@ func TestUpdateConfigSourceKeepsReloadCommonOnReloadFailure(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if svr.reloadCommon != newCommon {
-		t.Fatalf("reloadCommon should keep new value on reload failure")
+	// Transactional semantics: every state change must be rolled back.
+	if svr.reloadCommon != prevCommon {
+		t.Fatalf("reloadCommon should roll back to previous value on reload failure")
+	}
+	restored, _, snapshotErr := configSource.Snapshot()
+	require.NoError(t, snapshotErr)
+	require.Len(t, restored, 1)
+	if restored[0].GetBaseConfig().Name != "existing" {
+		t.Fatalf("config source should be restored, got proxy %q", restored[0].GetBaseConfig().Name)
 	}
 }
 

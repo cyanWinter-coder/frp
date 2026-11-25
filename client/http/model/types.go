@@ -19,6 +19,14 @@ const SourceStore = "store"
 // StatusResp is the response for GET /api/status
 type StatusResp map[string][]ProxyStatusResp
 
+// ConfigVersionResp is the response for GET /api/config/version
+type ConfigVersionResp struct {
+	// Version is the version of the configuration currently in effect. It
+	// starts at 1 and advances once per successfully applied update; failed or
+	// rolled-back updates leave it unchanged.
+	Version uint64 `json:"config_version"`
+}
+
 // ProxyStatusResp contains proxy status information
 type ProxyStatusResp struct {
 	Name       string `json:"name"`

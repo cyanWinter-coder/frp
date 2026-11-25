@@ -141,6 +141,11 @@ type Service struct {
 	visitorCfgs  []v1.VisitorConfigurer
 	clientSpec   *msg.ClientSpec
 
+	// configVersion monotonically identifies the configuration currently in
+	// effect. It advances only after a config transaction applies successfully;
+	// failed or rolled-back updates leave it unchanged.
+	configVersion atomic.Uint64
+
 	// aggregator manages multiple configuration sources.
 	// When set, the service watches for config changes and reloads automatically.
 	aggregator   *source.Aggregator
@@ -234,6 +239,9 @@ func NewService(options ServiceOptions) (*Service, error) {
 		connectorCreator: options.ConnectorCreator,
 		handleWorkConnCb: options.HandleWorkConnCb,
 	}
+	// The startup configuration is version 1; every successfully applied
+	// transaction increments the version.
+	s.configVersion.Store(1)
 
 	if webServer != nil {
 		webServer.RouteRegister(s.registerRouteHandlers)
@@ -434,7 +442,17 @@ func (svr *Service) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorC
 }
 
 // Caller must hold reloadMu.
+//
+// The published configuration and the running proxies/visitors are updated as
+// one transaction. If the running control rejects the change (its managers roll
+// back internally and return an error), the previously published configurers
+// are re-applied so the service keeps serving exactly the old configuration.
 func (svr *Service) updateAllConfigurerLocked(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {
+	svr.cfgMu.RLock()
+	prevProxyCfgs := svr.proxyCfgs
+	prevVisitorCfgs := svr.visitorCfgs
+	svr.cfgMu.RUnlock()
+
 	svr.cfgMu.Lock()
 	svr.proxyCfgs = proxyCfgs
 	svr.visitorCfgs = visitorCfgs
@@ -444,10 +462,35 @@ func (svr *Service) updateAllConfigurerLocked(proxyCfgs []v1.ProxyConfigurer, vi
 	ctl := svr.ctl
 	svr.ctlMu.RUnlock()
 
-	if ctl != nil {
-		return ctl.UpdateAllConfigurer(proxyCfgs, visitorCfgs)
+	if ctl == nil {
+		// No live control yet: the next login picks up the new configurers.
+		svr.configVersion.Add(1)
+		return nil
 	}
+
+	if err := ctl.UpdateAllConfigurer(proxyCfgs, visitorCfgs); err != nil {
+		// Restore the previously published configuration. Re-applying it is
+		// idempotent: the manager that failed has already rolled back to exactly
+		// this set, so its diff is empty; the other manager re-applies the same
+		// set and likewise makes no changes.
+		svr.cfgMu.Lock()
+		svr.proxyCfgs = prevProxyCfgs
+		svr.visitorCfgs = prevVisitorCfgs
+		svr.cfgMu.Unlock()
+		if restoreErr := ctl.UpdateAllConfigurer(prevProxyCfgs, prevVisitorCfgs); restoreErr != nil {
+			log.Errorf("rollback to previous config failed: %v (original error: %v)", restoreErr, err)
+		}
+		return err
+	}
+
+	svr.configVersion.Add(1)
 	return nil
+}
+
+// ConfigVersion returns the version of the configuration currently in effect.
+// It starts at 1 and advances once per successfully applied update.
+func (svr *Service) ConfigVersion() uint64 {
+	return svr.configVersion.Load()
 }
 
 func (svr *Service) UpdateConfigSource(
@@ -462,6 +505,10 @@ func (svr *Service) UpdateConfigSource(
 }
 
 // Caller must hold reloadMu.
+//
+// The whole update is transactional: the in-memory config source, reloadCommon
+// and the running proxies/visitors either all advance to the new configuration
+// or all stay at the previous one.
 func (svr *Service) updateConfigSourceLocked(
 	common *v1.ClientCommonConfig,
 	proxyCfgs []v1.ProxyConfigurer,
@@ -472,17 +519,31 @@ func (svr *Service) updateConfigSourceLocked(
 		return fmt.Errorf("config source is not available")
 	}
 
+	prevProxyCfgs, prevVisitorCfgs, err := cfgSource.Snapshot()
+	if err != nil {
+		return err
+	}
+	svr.cfgMu.RLock()
+	prevCommon := svr.reloadCommon
+	svr.cfgMu.RUnlock()
+
 	if err := cfgSource.ReplaceAll(proxyCfgs, visitorCfgs); err != nil {
 		return err
 	}
 
-	// Non-atomic update semantics: source has been updated at this point.
-	// Even if reload fails below, keep this common config for subsequent reloads.
 	svr.cfgMu.Lock()
 	svr.reloadCommon = common
 	svr.cfgMu.Unlock()
 
 	if err := svr.reloadConfigFromSourcesLocked(); err != nil {
+		// Roll back the source and reloadCommon so the stored state matches the
+		// configuration still running after the managers' internal rollback.
+		if restoreErr := cfgSource.ReplaceAll(prevProxyCfgs, prevVisitorCfgs); restoreErr != nil {
+			log.Errorf("rollback config source failed: %v (original error: %v)", restoreErr, err)
+		}
+		svr.cfgMu.Lock()
+		svr.reloadCommon = prevCommon
+		svr.cfgMu.Unlock()
 		return err
 	}
 	return nil

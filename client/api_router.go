@@ -38,6 +38,7 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 	subRouter.HandleFunc("/api/status", httppkg.MakeHTTPHandlerFunc(apiController.Status)).Methods(http.MethodGet)
 	subRouter.HandleFunc("/api/config", httppkg.MakeHTTPHandlerFunc(apiController.GetConfig)).Methods(http.MethodGet)
 	subRouter.HandleFunc("/api/config", httppkg.MakeHTTPHandlerFunc(apiController.PutConfig)).Methods(http.MethodPut)
+	subRouter.HandleFunc("/api/config/version", httppkg.MakeHTTPHandlerFunc(apiController.ConfigVersion)).Methods(http.MethodGet)
 	subRouter.HandleFunc("/api/proxy/{name}/config", httppkg.MakeHTTPHandlerFunc(apiController.GetProxyConfig)).Methods(http.MethodGet)
 	subRouter.HandleFunc("/api/visitor/{name}/config", httppkg.MakeHTTPHandlerFunc(apiController.GetVisitorConfig)).Methods(http.MethodGet)
 

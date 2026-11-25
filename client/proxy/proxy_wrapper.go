@@ -84,6 +84,7 @@ type Wrapper struct {
 	lastStartErr     time.Time
 	closeCh          chan struct{}
 	healthNotifyCh   chan struct{}
+	stopOnce         sync.Once
 	mu               sync.RWMutex
 
 	xl  *xlog.Logger
@@ -101,7 +102,7 @@ func NewWrapper(
 	msgTransporter transport.MessageTransporter,
 	vnetController *vnet.Controller,
 	udpPacketCodec string,
-) *Wrapper {
+) (*Wrapper, error) {
 	baseInfo := cfg.GetBaseConfig()
 	xl := xlog.FromContextSafe(ctx).Spawn().AppendPrefix(baseInfo.Name)
 	pw := &Wrapper{
@@ -130,7 +131,10 @@ func NewWrapper(
 	}
 
 	pw.pxy = NewProxy(pw.ctx, pw.Cfg, clientCfg, encryptionKey, pw.msgTransporter, pw.vnetController, udpPacketCodec)
-	return pw
+	if pw.pxy == nil {
+		return nil, fmt.Errorf("proxy [%s] type [%s] is not supported", baseInfo.Name, baseInfo.Type)
+	}
+	return pw, nil
 }
 
 func (pw *Wrapper) SetInWorkConnCallback(cb func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool) {
@@ -172,17 +176,22 @@ func (pw *Wrapper) Start() {
 	}
 }
 
+// Stop is idempotent. Rollback paths may stop a wrapper that was never started
+// or has already been stopped, and closing its lifecycle channels twice would
+// otherwise panic.
 func (pw *Wrapper) Stop() {
-	pw.mu.Lock()
-	defer pw.mu.Unlock()
-	close(pw.closeCh)
-	close(pw.healthNotifyCh)
-	pw.pxy.Close()
-	if pw.monitor != nil {
-		pw.monitor.Stop()
-	}
-	pw.Phase = ProxyPhaseClosed
-	pw.close()
+	pw.stopOnce.Do(func() {
+		close(pw.closeCh)
+		close(pw.healthNotifyCh)
+		pw.mu.Lock()
+		pw.pxy.Close()
+		if pw.monitor != nil {
+			pw.monitor.Stop()
+		}
+		pw.Phase = ProxyPhaseClosed
+		pw.close()
+		pw.mu.Unlock()
+	})
 }
 
 func (pw *Wrapper) close() {

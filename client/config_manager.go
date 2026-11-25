@@ -28,6 +28,13 @@ func (m *serviceConfigManager) ReloadFromFile(strict bool) error {
 		return fmt.Errorf("%w: frpc has no config file path", configmgmt.ErrInvalidArgument)
 	}
 
+	// Hold the serialization lock across file reading, validation and the
+	// transaction. Concurrent reloads are applied one after another, each
+	// re-reading the file, so the last reload always applies the latest
+	// on-disk configuration ("last writer wins").
+	m.svr.reloadMu.Lock()
+	defer m.svr.reloadMu.Unlock()
+
 	result, err := config.LoadClientConfigResult(m.svr.configFilePath, strict)
 	if err != nil {
 		return fmt.Errorf("%w: %v", configmgmt.ErrInvalidArgument, err)
@@ -46,20 +53,14 @@ func (m *serviceConfigManager) ReloadFromFile(strict bool) error {
 	}
 
 	var reloadPlugins func()
-	err = func() error {
-		m.svr.reloadMu.Lock()
-		defer m.svr.reloadMu.Unlock()
-
-		// Snapshot plugins and apply config in the same transaction as control handoff.
-		m.svr.ctlMu.RLock()
-		ctl := m.svr.ctl
-		m.svr.ctlMu.RUnlock()
-		if ctl != nil {
-			reloadPlugins = ctl.pm.PreparePluginReload()
-		}
-		return m.svr.updateConfigSourceLocked(result.Common, result.Proxies, result.Visitors)
-	}()
-	if err != nil {
+	// Snapshot plugins and apply config in the same transaction as control handoff.
+	m.svr.ctlMu.RLock()
+	ctl := m.svr.ctl
+	m.svr.ctlMu.RUnlock()
+	if ctl != nil {
+		reloadPlugins = ctl.pm.PreparePluginReload()
+	}
+	if err := m.svr.updateConfigSourceLocked(result.Common, result.Proxies, result.Visitors); err != nil {
 		return fmt.Errorf("%w: %v", configmgmt.ErrApplyConfig, err)
 	}
 
@@ -68,7 +69,7 @@ func (m *serviceConfigManager) ReloadFromFile(strict bool) error {
 		reloadPlugins()
 	}
 
-	log.Infof("success reload conf")
+	log.Infof("success reload conf, config version: %d", m.svr.ConfigVersion())
 	return nil
 }
 
@@ -97,6 +98,10 @@ func (m *serviceConfigManager) WriteConfigFile(content []byte) error {
 
 func (m *serviceConfigManager) GetProxyStatus() []*proxy.WorkingStatus {
 	return m.svr.getAllProxyStatus()
+}
+
+func (m *serviceConfigManager) ConfigVersion() uint64 {
+	return m.svr.ConfigVersion()
 }
 
 func (m *serviceConfigManager) GetProxyConfig(name string) (v1.ProxyConfigurer, bool) {

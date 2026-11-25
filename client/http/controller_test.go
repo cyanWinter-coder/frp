@@ -21,6 +21,7 @@ import (
 
 type fakeConfigManager struct {
 	reloadFromFileFn      func(strict bool) error
+	configVersionFn       func() uint64
 	readConfigFileFn      func() (string, error)
 	writeConfigFileFn     func(content []byte) error
 	getProxyStatusFn      func() []*proxy.WorkingStatus
@@ -47,6 +48,13 @@ func (m *fakeConfigManager) ReloadFromFile(strict bool) error {
 		return m.reloadFromFileFn(strict)
 	}
 	return nil
+}
+
+func (m *fakeConfigManager) ConfigVersion() uint64 {
+	if m.configVersionFn != nil {
+		return m.configVersionFn()
+	}
+	return 1
 }
 
 func (m *fakeConfigManager) ReadConfigFile() (string, error) {
@@ -264,6 +272,34 @@ func TestReloadErrorMapping(t *testing.T) {
 			}
 			assertHTTPCode(t, err, tc.expectedCode)
 		})
+	}
+}
+
+func TestConfigVersionHandler(t *testing.T) {
+	controller := &Controller{
+		manager: &fakeConfigManager{configVersionFn: func() uint64 { return 42 }},
+	}
+	ctx := httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/config/version", nil))
+	resp, err := controller.ConfigVersion(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	versionResp, ok := resp.(model.ConfigVersionResp)
+	if !ok {
+		t.Fatalf("unexpected response type: %T", resp)
+	}
+	if versionResp.Version != 42 {
+		t.Fatalf("expected version 42, got %d", versionResp.Version)
+	}
+
+	// Default fake reports version 1 when no override is configured.
+	defaultController := &Controller{manager: &fakeConfigManager{}}
+	resp, err = defaultController.ConfigVersion(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.(model.ConfigVersionResp).Version != 1 {
+		t.Fatalf("expected default version 1, got %d", resp.(model.ConfigVersionResp).Version)
 	}
 }
 

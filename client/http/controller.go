@@ -81,6 +81,11 @@ func (c *Controller) Reload(ctx *httppkg.Context) (any, error) {
 	return nil, nil
 }
 
+// ConfigVersion handles GET /api/config/version
+func (c *Controller) ConfigVersion(_ *httppkg.Context) (any, error) {
+	return model.ConfigVersionResp{Version: c.manager.ConfigVersion()}, nil
+}
+
 // Stop handles POST /api/stop
 func (c *Controller) Stop(ctx *httppkg.Context) (any, error) {
 	go c.manager.GracefulClose(100 * time.Millisecond)

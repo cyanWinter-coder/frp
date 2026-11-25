@@ -171,3 +171,46 @@ func TestConfigSource_ReplaceAll_DoesNotApplyRuntimeDefaults(t *testing.T) {
 	require.Empty(visitors[0].GetBaseConfig().BindAddr)
 	require.Empty(visitors[0].(*v1.XTCPVisitorConfig).Protocol)
 }
+
+func TestConfigSource_SnapshotIncludesDisabledAndIsDeepCopy(t *testing.T) {
+	require := require.New(t)
+	src := NewConfigSource()
+
+	enabled := mockProxy("enabled")
+	disabled := mockProxy("disabled")
+	disabledFlag := false
+	disabled.GetBaseConfig().Enabled = &disabledFlag
+	visitor := mockVisitor("visitor1")
+
+	require.NoError(src.ReplaceAll(
+		[]v1.ProxyConfigurer{enabled, disabled},
+		[]v1.VisitorConfigurer{visitor},
+	))
+
+	proxies, visitors, err := src.Snapshot()
+	require.NoError(err)
+	// Snapshot keeps disabled entries unlike Load, which filters them.
+	require.Len(proxies, 2)
+	require.Len(visitors, 1)
+
+	// Mutating the snapshot must not affect the stored configuration.
+	for _, p := range proxies {
+		p.GetBaseConfig().LocalPort = 9999
+	}
+	snapshotAgain, _, err := src.Snapshot()
+	require.NoError(err)
+	require.Len(snapshotAgain, 2)
+	for _, p := range snapshotAgain {
+		require.Equal(8080, p.GetBaseConfig().LocalPort,
+			"stored config must be unaffected by snapshot mutation")
+	}
+
+	// A snapshot can be restored through ReplaceAll after a failed transaction.
+	require.NoError(src.ReplaceAll([]v1.ProxyConfigurer{mockProxy("different")}, nil))
+	require.NoError(src.ReplaceAll(proxies, visitors))
+	restored, restoredVisitors, err := src.Load()
+	require.NoError(err)
+	require.Len(restored, 1, "Load filters the disabled entry again")
+	require.Equal("enabled", restored[0].GetBaseConfig().Name)
+	require.Len(restoredVisitors, 1)
+}

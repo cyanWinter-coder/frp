@@ -93,6 +93,7 @@ func (pm *Manager) Close() {
 		pxy.Stop()
 	}
 	pm.proxies = make(map[string]*Wrapper)
+	pm.closed = true
 }
 
 func (pm *Manager) HandleWorkConn(name string, workConn net.Conn, m *msg.StartWorkConn) {
@@ -174,7 +175,14 @@ func (pm *Manager) PreparePluginReload() func() {
 	}
 }
 
-func (pm *Manager) UpdateAll(proxyCfgs []v1.ProxyConfigurer) {
+// UpdateAll applies the desired proxy set as a transaction.
+//
+// Only proxies whose configuration changed are stopped and recreated; proxies
+// absent from the new set are removed and new ones are started. Unchanged
+// proxies keep their connections. If any new proxy fails to start, every change
+// made by this call is rolled back and the previously running proxy set is
+// restored before the error is returned.
+func (pm *Manager) UpdateAll(proxyCfgs []v1.ProxyConfigurer) error {
 	xl := xlog.FromContextSafe(pm.ctx)
 	proxyCfgsMap := lo.KeyBy(proxyCfgs, func(c v1.ProxyConfigurer) string {
 		return c.GetBaseConfig().Name
@@ -182,15 +190,20 @@ func (pm *Manager) UpdateAll(proxyCfgs []v1.ProxyConfigurer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	if pm.closed {
+		return fmt.Errorf("proxy manager is closed")
+	}
+
+	// Snapshot the running set so a partial failure can be fully undone.
+	previousProxies := make(map[string]*Wrapper, len(pm.proxies))
+	for name, pxy := range pm.proxies {
+		previousProxies[name] = pxy
+	}
+
 	delPxyNames := make([]string, 0)
 	for name, pxy := range pm.proxies {
-		del := false
 		cfg, ok := proxyCfgsMap[name]
 		if !ok || !reflect.DeepEqual(pxy.Cfg, cfg) {
-			del = true
-		}
-
-		if del {
 			delPxyNames = append(delPxyNames, name)
 			delete(pm.proxies, name)
 			pxy.Stop()
@@ -200,21 +213,45 @@ func (pm *Manager) UpdateAll(proxyCfgs []v1.ProxyConfigurer) {
 		xl.Infof("proxy removed: %s", delPxyNames)
 	}
 
+	added := make(map[string]*Wrapper)
 	addPxyNames := make([]string, 0)
+	rollback := func(applyErr error) error {
+		xl.Warnf("apply proxies failed: %v, rolling back", applyErr)
+		for name, pxy := range added {
+			delete(pm.proxies, name)
+			pxy.Stop()
+		}
+		// Restore the previous set. Entries still present in pm.proxies are
+		// unchanged proxies and must not be touched.
+		for name, pxy := range previousProxies {
+			if _, ok := pm.proxies[name]; !ok {
+				pm.proxies[name] = pxy
+				pxy.Start()
+			}
+		}
+		return applyErr
+	}
+
 	for _, cfg := range proxyCfgs {
 		name := cfg.GetBaseConfig().Name
-		if _, ok := pm.proxies[name]; !ok {
-			pxy := NewWrapper(pm.ctx, cfg, pm.clientCfg, pm.encryptionKey, pm.HandleEvent, pm.msgTransporter, pm.vnetController, pm.udpPacketCodec)
-			if pm.inWorkConnCallback != nil {
-				pxy.SetInWorkConnCallback(pm.inWorkConnCallback)
-			}
-			pm.proxies[name] = pxy
-			addPxyNames = append(addPxyNames, name)
-
-			pxy.Start()
+		if _, ok := pm.proxies[name]; ok {
+			continue
 		}
+		pxy, err := NewWrapper(pm.ctx, cfg, pm.clientCfg, pm.encryptionKey, pm.HandleEvent,
+			pm.msgTransporter, pm.vnetController, pm.udpPacketCodec)
+		if err != nil {
+			return rollback(err)
+		}
+		if pm.inWorkConnCallback != nil {
+			pxy.SetInWorkConnCallback(pm.inWorkConnCallback)
+		}
+		pm.proxies[name] = pxy
+		added[name] = pxy
+		addPxyNames = append(addPxyNames, name)
+		pxy.Start()
 	}
 	if len(addPxyNames) > 0 {
 		xl.Infof("proxy added: %s", addPxyNames)
 	}
+	return nil
 }

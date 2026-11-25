@@ -53,3 +53,21 @@ func (s *ConfigSource) ReplaceAll(proxies []v1.ProxyConfigurer, visitors []v1.Vi
 	s.visitors = nextVisitors
 	return nil
 }
+
+// Snapshot returns deep copies of every stored proxy and visitor, including
+// entries explicitly disabled. It is used to capture the previous state before
+// a transaction so a failed ReplaceAll/reload can be restored exactly.
+func (s *ConfigSource) Snapshot() (proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	proxies = make([]v1.ProxyConfigurer, 0, len(s.proxies))
+	for _, p := range s.proxies {
+		proxies = append(proxies, p)
+	}
+	visitors = make([]v1.VisitorConfigurer, 0, len(s.visitors))
+	for _, v := range s.visitors {
+		visitors = append(visitors, v)
+	}
+	return cloneConfigurers(proxies, visitors)
+}
